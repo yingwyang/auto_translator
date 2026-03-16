@@ -1,0 +1,6 @@
+name: astrbot_plugin_auto_translator
+display_name: 自动翻译插件
+version: 1.0.0
+author: User
+desc: 自动将机器人发送的消息翻译成指定语言
+repo: ""
