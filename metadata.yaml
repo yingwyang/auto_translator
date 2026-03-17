@@ -1,9 +1,9 @@
 name: astrbot_plugin_auto_translator
 display_name: 自动翻译插件
 version: 1.0.0
-author: User
+author: yingwyang
 desc: 自动将机器人发送的消息翻译成指定语言
-repo: ""
+repo: https://github.com/yingwyang/auto_translator
 config:
   enable_auto_translate:
     type: bool
