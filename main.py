@@ -45,6 +45,10 @@ class AutoTranslator(Star):
         # 复用 aiohttp session
         self._session = None
         
+        # 缓存 LLM provider，避免每次翻译都查找
+        self._llm_provider = None
+        self._llm_provider_checked = False
+        
         logger.info(f"[AutoTranslator] 插件已加载，{self.source_lang} -> {self.target_lang}")
     
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -91,22 +95,14 @@ class AutoTranslator(Star):
         if not text or not text.strip():
             return text
         
-        # 尝试多个翻译源
-        if self.use_llm_translate:
-            translators = [
-                ("llm", self._translate_llm),
-                ("local", self._translate_local),
-                ("bing", self._translate_bing),
-                ("google", self._translate_google),
-            ]
-        else:
-            translators = [
-                ("local", self._translate_local),
-                ("bing", self._translate_bing),
-                ("google", self._translate_google),
-                ("mymemory", self._translate_mymemory),
-                ("libre", self._translate_libre),
-            ]
+        # 尝试多个翻译源（已移除 Bing 和 Google，LLM 翻译作为首选）
+        # 注意：本地翻译可能会阻塞，放在后面
+        translators = [
+            ("llm", self._translate_llm),
+            ("mymemory", self._translate_mymemory),
+            ("libre", self._translate_libre),
+            ("local", self._translate_local),
+        ]
         
         last_error = None
         for name, translator in translators:
@@ -128,30 +124,6 @@ class AutoTranslator(Star):
         
         logger.error(f"[AutoTranslator] 所有翻译源都失败了，最后错误: {last_error}")
         return text  # 返回原文作为fallback
-    
-    async def _translate_google(self, text: str, from_lang: str, to_lang: str) -> str:
-        """Google 翻译 API"""
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            "client": "gtx",
-            "sl": from_lang,
-            "tl": to_lang,
-            "dt": "t",
-            "q": text
-        }
-        
-        session = await self._get_session()
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-                    translated = "".join([item[0] for item in data[0] if isinstance(item, list) and len(item) > 0])
-                    return translated
-                raise ValueError(f"Google API 返回格式异常: {type(data)}")
-            else:
-                raise aiohttp.ClientResponseError(
-                    resp.request_info, resp.history, status=resp.status
-                )
     
     async def _translate_mymemory(self, text: str, from_lang: str, to_lang: str) -> str:
         """MyMemory 翻译 API（备用）"""
@@ -195,81 +167,79 @@ class AutoTranslator(Star):
                     resp.request_info, resp.history, status=resp.status
                 )
     
-    async def _translate_bing(self, text: str, from_lang: str, to_lang: str) -> str:
-        """微软 Bing 翻译 API（国内可访问）"""
-        url = "https://cn.bing.com/ttranslatev3"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": "https://cn.bing.com/translator"
-        }
-        
-        lang_map = {
-            "zh": "zh-Hans",
-            "en": "en",
-            "ja": "ja",
-            "ko": "ko",
-            "fr": "fr",
-            "de": "de",
-            "es": "es",
-            "ru": "ru"
-        }
-        
-        from_lang_mapped = lang_map.get(from_lang, from_lang)
-        to_lang_mapped = lang_map.get(to_lang, to_lang)
-        
-        data = {
-            "fromLang": from_lang_mapped,
-            "to": to_lang_mapped,
-            "text": text
-        }
-        
-        session = await self._get_session()
-        async with session.post(url, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-            if resp.status == 200:
-                text_content = await resp.text()
-                
-                # 严格验证返回内容
-                if not text_content or text_content.startswith("<"):
-                    raise ValueError(f"Bing API 返回非预期内容: {text_content[:100]}")
-                
-                try:
-                    import json
-                    result = json.loads(text_content)
-                    if isinstance(result, list) and len(result) > 0:
-                        translations = result[0].get("translations", [])
-                        if translations and isinstance(translations[0], dict):
-                            translated = translations[0].get("text")
-                            if translated:
-                                return translated
-                    raise ValueError(f"Bing API 返回结构异常")
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Bing API JSON 解析失败: {e}")
-            else:
-                raise aiohttp.ClientResponseError(
-                    resp.request_info, resp.history, status=resp.status
-                )
-    
     async def _translate_local(self, text: str, from_lang: str, to_lang: str) -> str:
         """使用本地 Argos Translate 翻译（无需网络）"""
-        await self._ensure_local_translator(from_lang, to_lang)
+        # 尝试直接翻译
+        try:
+            await self._ensure_local_translator(from_lang, to_lang)
+            translated = await asyncio.to_thread(
+                argostranslate.translate.translate, text, from_lang, to_lang
+            )
+            if translated:
+                return translated
+        except Exception as e:
+            logger.warning(f"[AutoTranslator] 直接翻译失败 {from_lang}->{to_lang}: {e}")
         
-        # 在后台线程执行翻译
-        translated = await asyncio.to_thread(
-            argostranslate.translate.translate, text, from_lang, to_lang
-        )
+        # 尝试通过英语中转
+        if from_lang != "en" and to_lang != "en":
+            try:
+                logger.info(f"[AutoTranslator] 尝试通过英语中转: {from_lang}->en->{to_lang}")
+                # 先翻译成英语
+                await self._ensure_local_translator(from_lang, "en")
+                english_text = await asyncio.to_thread(
+                    argostranslate.translate.translate, text, from_lang, "en"
+                )
+                if not english_text:
+                    raise ValueError("中转翻译第一步失败")
+                
+                # 再翻译成目标语言
+                await self._ensure_local_translator("en", to_lang)
+                final_text = await asyncio.to_thread(
+                    argostranslate.translate.translate, english_text, "en", to_lang
+                )
+                if final_text:
+                    logger.info(f"[AutoTranslator] 通过英语中转翻译成功")
+                    return final_text
+            except Exception as e:
+                logger.warning(f"[AutoTranslator] 中转翻译失败: {e}")
         
-        if translated:
-            return translated
-        else:
-            raise ValueError("本地翻译返回空结果")
+        raise ValueError("本地翻译失败，无法找到可用的语言包路径")
+    
+    def _get_llm_provider(self):
+        """获取 LLM provider（带缓存）"""
+        # 如果已经查找过且找到了，直接返回缓存的 provider
+        if self._llm_provider_checked:
+            return self._llm_provider
+        
+        # 标记为已查找
+        self._llm_provider_checked = True
+        
+        # 首先尝试获取 ID 为 "llm" 的 provider
+        provider = self.context.get_provider_by_id("llm")
+        
+        # 如果没有找到，尝试获取任意可用的 LLM provider
+        if not provider:
+            providers = self.context.get_all_providers()
+            for p in providers:
+                if hasattr(p, 'text_chat'):
+                    provider = p
+                    logger.info(f"[AutoTranslator] 找到 LLM provider: {getattr(p, 'id', 'unknown')}")
+                    break
+        
+        # 缓存 provider
+        self._llm_provider = provider
+        
+        if not provider:
+            logger.warning("[AutoTranslator] 未找到可用的 LLM provider")
+        
+        return provider
     
     async def _translate_llm(self, text: str, from_lang: str, to_lang: str) -> str:
         """使用 LLM 进行高质量翻译"""
-        provider = self.context.get_provider_by_id("llm")
+        provider = self._get_llm_provider()
+        
         if not provider:
-            raise Exception("LLM provider 不可用")
+            raise Exception("LLM provider 未配置")
         
         lang_names = {
             "zh": "中文",
@@ -396,6 +366,52 @@ class AutoTranslator(Star):
     async def enable_translate(self, event: AstrMessageEvent):
         self.enable_auto_translate = True
         yield event.plain_result(f"✅ 自动翻译已开启 ({self.source_lang} -> {self.target_lang})")
+    
+    @filter.command("下载语言包")
+    async def download_language_pack(self, event: AstrMessageEvent):
+        """预下载语言包，避免翻译时阻塞"""
+        if not ARGOS_AVAILABLE:
+            yield event.plain_result("❌ 本地翻译功能不可用，请安装 argostranslate")
+            return
+        
+        msg = event.message_str.strip()
+        parts = msg.split()
+        
+        if len(parts) < 3:
+            yield event.plain_result(
+                "用法: 下载语言包 <源语言> <目标语言>\n"
+                "例如: 下载语言包 ja zh (下载日文到中文的语言包)\n"
+                "注意：如果没有直接的语言包，会自动下载中转所需的语言包"
+            )
+            return
+        
+        from_lang = parts[1]
+        to_lang = parts[2]
+        
+        yield event.plain_result(f"⏳ 开始下载语言包 {from_lang}->{to_lang}，请稍候...")
+        
+        try:
+            # 尝试直接下载
+            try:
+                await asyncio.to_thread(self._install_language_package, from_lang, to_lang)
+                yield event.plain_result(f"✅ 语言包 {from_lang}->{to_lang} 下载完成！")
+                return
+            except Exception as e:
+                logger.warning(f"直接下载失败: {e}")
+            
+            # 尝试下载中转语言包
+            if from_lang != "en" and to_lang != "en":
+                yield event.plain_result(f"⏳ 尝试下载中转语言包 {from_lang}->en 和 en->{to_lang}...")
+                await asyncio.to_thread(self._install_language_package, from_lang, "en")
+                yield event.plain_result(f"✅ 语言包 {from_lang}->en 下载完成")
+                await asyncio.to_thread(self._install_language_package, "en", to_lang)
+                yield event.plain_result(f"✅ 语言包 en->{to_lang} 下载完成")
+                yield event.plain_result(f"✅ 所有语言包下载完成！现在可以使用 {from_lang}->{to_lang} 翻译了")
+            else:
+                yield event.plain_result(f"❌ 语言包下载失败: {e}")
+        
+        except Exception as e:
+            yield event.plain_result(f"❌ 语言包下载失败: {e}")
     
     async def terminate(self):
         """插件卸载时清理资源"""

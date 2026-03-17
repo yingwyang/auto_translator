@@ -23,5 +23,5 @@ config:
     description: 是否显示原文
   use_llm_translate:
     type: bool
-    default: false
-    description: 是否使用 LLM 翻译（质量更好但更慢）
+    default: true
+    description: 是否使用 LLM 翻译（质量更好，默认启用）
