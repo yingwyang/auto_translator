@@ -4,3 +4,24 @@ version: 1.0.0
 author: User
 desc: 自动将机器人发送的消息翻译成指定语言
 repo: ""
+config:
+  enable_auto_translate:
+    type: bool
+    default: true
+    description: 是否启用自动翻译
+  source_lang:
+    type: string
+    default: "ja"
+    description: 源语言代码 (如 zh, en, ja, ko)
+  target_lang:
+    type: string
+    default: "zh"
+    description: 目标语言代码 (如 zh, en, ja, ko)
+  show_original:
+    type: bool
+    default: true
+    description: 是否显示原文
+  use_llm_translate:
+    type: bool
+    default: false
+    description: 是否使用 LLM 翻译（质量更好但更慢）

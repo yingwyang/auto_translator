@@ -1,0 +1,14 @@
+# 自动翻译插件配置文件
+# Auto Translator Plugin Configuration
+
+# 是否启用自动翻译
+enable_auto_translate: true
+
+# 源语言代码 (如 zh, en, ja, ko)
+source_lang: "ja"
+
+# 目标语言代码 (如 zh, en, ja, ko)
+target_lang: "zh"
+
+# 是否显示原文
+show_original: true
